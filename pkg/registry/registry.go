@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -16,44 +17,53 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+var knownAuthVariations = map[string]string{
+	"https://registry-1.docker.io": "https://auth.docker.io",
+}
+
 type OCIDownloader struct {
-	image               string
-	tag                 string
-	destination         string
-	token               string
-	namespace           string
-	registryApiEndpoint string
+	image                   string
+	tag                     string
+	destination             string
+	token                   string
+	registryApiEndpointAuth string
+	registryApiEndpointV2   string
 }
 
 func (od *OCIDownloader) ToString() string {
-	return fmt.Sprintf("Image: %s Tag: %s Namespace: %s", od.image, od.tag, od.namespace)
+	return fmt.Sprintf("Image: %s Tag: %s Registry: %s", od.image, od.tag, od.registryApiEndpointV2)
 }
 
-func newOciDownloader(registryEndpoint, image, destination string) *OCIDownloader {
-	components := strings.Split(image, ":")
-	if len(components) < 2 {
-		log.Error().Msg("Image tag needs to be provided")
+func isValid(apiEndpoint string) bool {
+	res, err := http.Get(apiEndpoint)
+	log.Debug().Int("status code", res.StatusCode).Send()
+	return res.StatusCode != 200 || err != nil
+}
+
+func newOciDownloader(registry, image, tag, destination string) *OCIDownloader {
+	apiEndpointV2 := fmt.Sprintf("%s/v2", registry)
+	if !isValid(apiEndpointV2) {
+		log.Error().Msgf("Api endpoint is not valid: %s", apiEndpointV2)
 		return nil
 	}
-	tag := components[len(components)-1]
-	image = components[0]
-	parts := strings.Split(image, "/")
-	namespace := ""
-	if len(parts) > 1 {
-		namespace = strings.Join(parts[:len(parts)-1], "/")
+	// check for known differences in api design
+	// otherwise just assume that we can use the base registry
+	authEndpoint, ok := knownAuthVariations[registry]
+	if !ok {
+		authEndpoint = registry
 	}
 	return &OCIDownloader{
-		image:               image,
-		tag:                 tag,
-		destination:         destination,
-		namespace:           namespace,
-		registryApiEndpoint: registryEndpoint,
+		image:                   image,
+		tag:                     tag,
+		destination:             destination,
+		registryApiEndpointV2:   apiEndpointV2,
+		registryApiEndpointAuth: authEndpoint,
 	}
 }
 
 // For now this ONLY supports ghcr
-func DownloadOciToPath(registry, image, destination string) error {
-	downloader := newOciDownloader(registry, image, destination)
+func DownloadOciToPath(registry, image, tag, destination string) error {
+	downloader := newOciDownloader(registry, image, tag, destination)
 	if downloader == nil {
 		return errors.New("Could not parse provided image, see logs for details ")
 	}
@@ -106,8 +116,18 @@ func DownloadOciToPath(registry, image, destination string) error {
 }
 
 func (od *OCIDownloader) RefreshToken() {
+	registryBaseUrl := ""
+	base, err := url.Parse(od.registryApiEndpointV2)
+	if err != nil {
+		log.Error().Err(err)
+	} else {
+		registryBaseUrl = base.Host
+	}
+	if registryBaseUrl == "registry-1.docker.io" {
+		registryBaseUrl = "registry.docker.io"
+	}
 	res, err := http.Get(
-		fmt.Sprintf("https://ghcr.io/token?scope=repository:%s:pull", od.image),
+		fmt.Sprintf("%s/token?service=%s&scope=repository:%s:pull", od.registryApiEndpointAuth, registryBaseUrl, od.image),
 	)
 
 	if err != nil {
@@ -160,13 +180,15 @@ func (od *OCIDownloader) doRequest(url, acceptHeader string) ([]byte, error) {
 }
 
 func (od *OCIDownloader) GetManifest() (oci.OCIImageIndex, error) {
-	data, err := od.doRequest(fmt.Sprintf("%s/%s/manifests/%s", od.registryApiEndpoint, od.image, od.tag), "application/vnd.oci.image.manifest.v1+json, application/vnd.oci.image.index.v1+json")
+	data, err := od.doRequest(fmt.Sprintf("%s/%s/manifests/%s", od.registryApiEndpointV2, od.image, od.tag), "application/vnd.oci.image.manifest.v1+json, application/vnd.oci.image.index.v1+json")
 	if err != nil {
 		log.Error().Err(err).Msg("Could not fetch manifest for image")
 		return oci.OCIImageIndex{}, err
 	}
 
 	var parsed oci.OCIImageIndex
+
+	log.Debug().Msg(fmt.Sprintf("%s/%s/manifests/%s", od.registryApiEndpointV2, od.image, od.tag))
 	err = json.Unmarshal(data, &parsed)
 	if err != nil {
 		log.Error().Err(err).Msg("Could not fetch auth token for oci repository")
@@ -177,7 +199,7 @@ func (od *OCIDownloader) GetManifest() (oci.OCIImageIndex, error) {
 }
 
 func (od *OCIDownloader) GetSpecificManifest(digest string) (oci.OCIImageManifest, error) {
-	data, err := od.doRequest(fmt.Sprintf("%s/%s/manifests/%s", od.registryApiEndpoint, od.image, digest), "application/vnd.oci.image.manifest.v1+json, application/vnd.oci.image.index.v1+json")
+	data, err := od.doRequest(fmt.Sprintf("%s/%s/manifests/%s", od.registryApiEndpointV2, od.image, digest), "application/vnd.oci.image.manifest.v1+json, application/vnd.oci.image.index.v1+json")
 	if err != nil {
 		log.Error().Err(err).Msg("Could not fetch manifest for image")
 		return oci.OCIImageManifest{}, err
@@ -205,7 +227,7 @@ func (od *OCIDownloader) openTar() *tar.Writer {
 }
 
 func (od *OCIDownloader) getLayerData(digest string) ([]byte, error) {
-	return od.doRequest(fmt.Sprintf("%s/%s/blobs/%s", od.registryApiEndpoint, od.image, digest), "")
+	return od.doRequest(fmt.Sprintf("%s/%s/blobs/%s", od.registryApiEndpointV2, od.image, digest), "")
 }
 
 func writeToTar(writer *tar.Writer, header *tar.Header, data []byte) error {
@@ -238,7 +260,7 @@ func (od *OCIDownloader) addLayerToTar(writer *tar.Writer, metadata oci.LayerMet
 }
 
 func (od *OCIDownloader) addConfigToTar(writer *tar.Writer, digest string) error {
-	data, err := od.doRequest(fmt.Sprintf("%s/%s/blobs/%s", od.registryApiEndpoint, od.image, digest), "")
+	data, err := od.doRequest(fmt.Sprintf("%s/%s/blobs/%s", od.registryApiEndpointV2, od.image, digest), "")
 
 	if err != nil {
 		return err
