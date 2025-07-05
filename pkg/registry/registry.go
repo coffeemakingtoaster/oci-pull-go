@@ -21,6 +21,8 @@ var knownAuthVariations = map[string]string{
 	"https://registry-1.docker.io": "https://auth.docker.io",
 }
 
+// Struct containing all information needed during the download of an image
+// internally stores session relevant information
 type OCIDownloader struct {
 	image                   string
 	tag                     string
@@ -30,6 +32,7 @@ type OCIDownloader struct {
 	registryApiEndpointV2   string
 }
 
+// Return formatted string representation
 func (od *OCIDownloader) ToString() string {
 	return fmt.Sprintf("Image: %s Tag: %s Registry: %s", od.image, od.tag, od.registryApiEndpointV2)
 }
@@ -61,13 +64,15 @@ func newOciDownloader(registry, image, tag, destination string) *OCIDownloader {
 	}
 }
 
-// For now this ONLY supports ghcr
+// Download image with given tag from registry
+// Registry auth is expected to be present at <registry domain>/token
+// Dockerhub expection is handled...others will not :)
 func DownloadOciToPath(registry, image, tag, destination string) error {
 	downloader := newOciDownloader(registry, image, tag, destination)
 	if downloader == nil {
 		return errors.New("Could not parse provided image, see logs for details ")
 	}
-	manifest, err := downloader.GetManifest()
+	manifest, err := downloader.GetIndex()
 	if err != nil {
 		return err
 	}
@@ -115,6 +120,7 @@ func DownloadOciToPath(registry, image, tag, destination string) error {
 	return nil
 }
 
+// Refresh the internally stored auth token
 func (od *OCIDownloader) RefreshToken() {
 	registryBaseUrl := ""
 	base, err := url.Parse(od.registryApiEndpointV2)
@@ -179,7 +185,8 @@ func (od *OCIDownloader) doRequest(url, acceptHeader string) ([]byte, error) {
 	return io.ReadAll(res.Body)
 }
 
-func (od *OCIDownloader) GetManifest() (oci.OCIImageIndex, error) {
+// Fetch and parse the global index for an image
+func (od *OCIDownloader) GetIndex() (oci.OCIImageIndex, error) {
 	data, err := od.doRequest(fmt.Sprintf("%s/%s/manifests/%s", od.registryApiEndpointV2, od.image, od.tag), "application/vnd.oci.image.manifest.v1+json, application/vnd.oci.image.index.v1+json")
 	if err != nil {
 		log.Error().Err(err).Msg("Could not fetch manifest for image")
@@ -188,16 +195,16 @@ func (od *OCIDownloader) GetManifest() (oci.OCIImageIndex, error) {
 
 	var parsed oci.OCIImageIndex
 
-	log.Debug().Msg(fmt.Sprintf("%s/%s/manifests/%s", od.registryApiEndpointV2, od.image, od.tag))
 	err = json.Unmarshal(data, &parsed)
 	if err != nil {
 		log.Error().Err(err).Msg("Could not fetch auth token for oci repository")
 		return oci.OCIImageIndex{}, err
 	}
-	log.Debug().Msg("OCI image manifest fetched")
+	log.Debug().Msg("OCI image index fetched")
 	return parsed, nil
 }
 
+// Fetch and parse the manifest for given image (by digest)
 func (od *OCIDownloader) GetSpecificManifest(digest string) (oci.OCIImageManifest, error) {
 	data, err := od.doRequest(fmt.Sprintf("%s/%s/manifests/%s", od.registryApiEndpointV2, od.image, digest), "application/vnd.oci.image.manifest.v1+json, application/vnd.oci.image.index.v1+json")
 	if err != nil {

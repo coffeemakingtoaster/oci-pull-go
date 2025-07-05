@@ -51,6 +51,7 @@ type LayerMetaData struct {
 	Size      float64 `json:"size"`
 }
 
+// Image Metadata for a specific architecture
 type ImageMetadata struct {
 	Architecture string `json:"architecture"`
 	Config       struct {

@@ -10,16 +10,22 @@ import (
 
 const defaultRegistry = "https://registry-1.docker.io"
 
+// Struct containing all information necessary for pulling an image
 type ImageData struct {
 	imageName string
 	registry  string
 	tag       string
 }
 
+// Return formatted string representation
 func (id *ImageData) ToString() string {
 	return fmt.Sprintf("Image: %s Tag: %s Registry: %s", id.imageName, id.tag, id.registry)
 }
 
+// Pull given image to path
+// Image should be in the forward of [registry.domain/]<imagename>:tag
+// Registry should support the v2 docker api. Auth edge cases will (likely) not be handled
+// Default repository is docker hub
 func PullToPath(image, destinationPath string) error {
 	imageData := parseImage(image)
 	log.Debug().Msg(imageData.ToString())
